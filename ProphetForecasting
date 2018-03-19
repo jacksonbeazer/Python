@@ -1,0 +1,65 @@
+import pandas as pd
+from fbprophet import Prophet
+import os
+
+os.chdir(r'C:\MachineLearning\ExpectedPerformance')
+holidays = pd.read_csv("holidays.csv",thousands=',')
+holidays['ds'] = pd.to_datetime(holidays['ds'])
+financial_holidays = pd.read_csv("holidaysWithQuarterEnd.csv",thousands=',')
+
+
+
+def forecast_components(measure_name,input_csv,changepoint_scale=.05):
+    """Read in CSV and format column headers and data types"""
+    df = pd.read_csv(input_csv,thousands=',')
+    df=df.rename(columns = {list(df.columns)[-1]:'y'})
+    df=df.rename(columns = {list(df.columns)[0]:'ds'})
+    df = df[df['y'] != 0]
+    df = df.dropna(subset=['y'])
+    df['ds'] = pd.to_datetime(df['ds'],infer_datetime_format=True)
+    df.columns = df.columns.str.replace(' ','')
+
+    """Get a list of column names and create a composite key called 'detail key"""
+    column_names = list(df.columns.str.replace(' ',''))
+    for i in ['ds','y']:
+        column_names.remove(i)
+
+    df['detail_key'] = ''
+    for name in column_names:
+        df['detail_key'] += (df[name]+'-')
+
+    column_names = ['detail_key']
+    column_df_dic={}
+
+    """Forecast each cut"""
+    for col in column_names:
+        temp = df.groupby(['ds', col])['y'].sum().reset_index()
+        mask_list = temp[col].unique()
+        newdf = pd.DataFrame()
+        for masks in mask_list:
+            mask = temp[col] == masks
+            masked_temp=temp[mask]
+            print('masked_temp: ')
+            print(masked_temp.head())
+            if masked_temp['y'].count()>5:
+                m = Prophet(holidays=financial_holidays, interval_width=0.8, changepoint_prior_scale=changepoint_scale)
+                m.fit(masked_temp)
+                future = m.make_future_dataframe(periods=26, freq='w')
+                fcst = m.predict(future)
+                fcst.tail()
+                fcst = fcst.filter(['ds', 'yhat', 'yhat_lower', 'yhat_upper'], axis=1)
+                fcst = pd.merge(fcst,masked_temp, how='left', on='ds')
+                fcst[col]=masks
+                fcst['std_dev'] = fcst['yhat'].std()
+                print('fcst: ')
+                print( fcst.head())
+                newdf=newdf.append(fcst,ignore_index=True)
+                print(fcst.head())
+        column_df_dic[col]=newdf  # Add new dataset to a dictionary
+    for dataset in column_df_dic.keys():
+        column_df_dic[dataset].to_csv('C:\MachineLearning\ExpectedPerformance\\Output\\'+measure_name+'-'+dataset+'.csv',index=False)  # Write CSV Files
+
+
+measures_to_forecast=['GrossNewARR']
+for m in measures_to_forecast:
+    forecast_components(measure_name=m,input_csv=m+'.csv')
