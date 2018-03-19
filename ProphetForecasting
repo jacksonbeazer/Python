@@ -1,3 +1,11 @@
+"""
+This script allows me to pull in data from various business KPIs and run a forecasting model on each one at various levels.
+I'm forecasting each metric at each of its intersections (each geo, region, segment, product, etc. combination has its own forecast).
+Then I'm aggregating those back up in order to create a mathematical prediction for where each measure should be. We are using this 
+to track anomalous behavior in our various KPIs so we can knwo where to focus our attention as a business.
+"""
+
+
 import pandas as pd
 from fbprophet import Prophet
 import os
