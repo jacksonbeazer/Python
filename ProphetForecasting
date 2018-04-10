@@ -1,22 +1,35 @@
-"""
-This script allows me to pull in data from various business KPIs and run a forecasting model on each one at various levels.
-I'm forecasting each metric at each of its intersections (each geo, region, segment, product, etc. combination has its own forecast).
-Then I'm aggregating those back up in order to create a mathematical prediction for where each measure should be. We are using this 
-to track anomalous behavior in our various KPIs so we can knwo where to focus our attention as a business.
-"""
+"""Downloading Data from Tableau Server"""
 
+import subprocess
+
+subprocess.call("tabcmd logout")
+subprocess.call("tabcmd login -s https://dashdiscovery.corp.adobe.com -u beazer --password-file C:\TabCMD\scripts\Credential2.txt")
+
+data_list = ['GrossNewARR','NetCancelARR','Orders','QFM','UQFM','Visits','F2P','D2P','PFCancels','UICancels']
+
+
+for name in data_list:
+    subprocess.call('C:/TabCMD10/extras/CommandLineUtility/tabcmd.exe export "ExpectedDataDumps/' + name + '" --csv -f "C:/MachineLearning/ExpectedPerformance/' + name + '.csv"')
+
+
+
+
+"""Forecasting Data"""
 
 import pandas as pd
 from fbprophet import Prophet
 import os
 
 os.chdir(r'C:\MachineLearning\ExpectedPerformance')
+
 holidays = pd.read_csv("holidays.csv",thousands=',')
 holidays['ds'] = pd.to_datetime(holidays['ds'])
+
+#Here is where we read in the holidays. You can find and edit the file at this filename and location:
 financial_holidays = pd.read_csv("holidaysWithQuarterEnd.csv",thousands=',')
 
 
-
+#Here is the function that creates the forecast. The main thing to adjust is the "changepoint_scale". I have it set to .05 for everything, but you can increase or decrease it between 0-1.
 def forecast_components(measure_name,input_csv,changepoint_scale=.05):
     """Read in CSV and format column headers and data types"""
     df = pd.read_csv(input_csv,thousands=',')
@@ -26,19 +39,15 @@ def forecast_components(measure_name,input_csv,changepoint_scale=.05):
     df = df.dropna(subset=['y'])
     df['ds'] = pd.to_datetime(df['ds'],infer_datetime_format=True)
     df.columns = df.columns.str.replace(' ','')
-
     """Get a list of column names and create a composite key called 'detail key"""
     column_names = list(df.columns.str.replace(' ',''))
     for i in ['ds','y']:
         column_names.remove(i)
-
     df['detail_key'] = ''
     for name in column_names:
         df['detail_key'] += (df[name]+'-')
-
     column_names = ['detail_key']
     column_df_dic={}
-
     """Forecast each cut"""
     for col in column_names:
         temp = df.groupby(['ds', col])['y'].sum().reset_index()
@@ -67,7 +76,49 @@ def forecast_components(measure_name,input_csv,changepoint_scale=.05):
     for dataset in column_df_dic.keys():
         column_df_dic[dataset].to_csv('C:\MachineLearning\ExpectedPerformance\\Output\\'+measure_name+'-'+dataset+'.csv',index=False)  # Write CSV Files
 
-
-measures_to_forecast=['GrossNewARR']
+"""Here is where I loop through the different measures. I have a tab in the Tableau Server-housed data that has a name identical to each of these. 
+    That is what I am downloading and looping through the forecast funtion above. Then I add them to a dictionary and then write each dataset to its own CSV file."""
+measures_to_forecast=['GrossNewARR','NetCancelARR','Visits','Orders','QFM','UQFM','F2P','D2P','PFCancels','UICancels']
 for m in measures_to_forecast:
     forecast_components(measure_name=m,input_csv=m+'.csv')
+
+
+"""Uploading to Hadoop"""
+import csv
+
+
+os.chdir('C:/MachineLearning/ExpectedPerformance/Output')
+directory_location = os.getcwd()
+
+
+
+file_list = os.listdir(directory_location)
+
+
+# Get credentials
+with open('C:\TabCMD\scripts\credential2.txt') as inputfile:
+    credential = list(csv.reader(inputfile))
+
+
+# Load all CSV  files to node server and then send to HDFS
+for file in file_list:
+    print(file)
+    file_detail=file.replace('.csv','').split('-')
+    print(file_detail)
+    HDFS_path = "\'/user/beazer/expectations/%s\'" % (file)
+    print(HDFS_path)
+    os.chdir('C:/MachineLearning/ExpectedPerformance/HadoopLoad')
+    f=open(file_detail[0]+'_'+file_detail[1]+'.hql','w')
+    f.write('DROP TABLE IF EXISTS gtm.expected_'+file_detail[0]+"_"+file_detail[1]+';\n'+
+        'CREATE TABLE IF NOT EXISTS gtm.expected_'+file_detail[0]+'_'+file_detail[1]+'(datestring string, yhat double, yhat_lower double, yhat_upper double, '+file_detail[1]+' string, y double, std_dev double) row format delimited fields terminated by "," stored as textfile tblproperties("skip.header.line.count"="1");\n'+
+        "LOAD DATA INPATH  "+HDFS_path+" OVERWRITE INTO TABLE gtm.expected_"+file_detail[0]+"_"+file_detail[1]+";")
+    f.close()
+    os.chdir('C:/MachineLearning/ExpectedPerformance/Output')
+    subprocess.call("pscp -pw " + str(credential[0][0]) + " C:/MachineLearning/ExpectedPerformance/HadoopLoad/" + file_detail[0]+'_'+file_detail[1]+'.hql' + " sj1dra006:/user/beazer/expectations")  # Send HQL files to Node Server
+    subprocess.call("pscp -pw " + str(credential[0][0]) + " C:/MachineLearning/ExpectedPerformance/Output/" + file + " sj1dra006:/user/beazer/expectations")
+    subprocess.call('plink -batch -load sj1dra006_saved hdfs dfs -put /user/beazer/expectations/' + file + ' /user/beazer/expectations')  # Send CSVs to Node Server
+    subprocess.call("plink -batch -load sj1dra006_saved beeline -u jdbc:hive2://hs2prod.corp.adobe.com:10000 -n beazer -p "+str(credential[0][0]) +" -f '/user/beazer/expectations/"+file_detail[0]+"_"+file_detail[1]+".hql'")  # Run HQL scripts
+
+
+subprocess.call("pscp -pw " + str(credential[0][0]) + " C:/MachineLearning/ExpectedPerformance/TotalHadoopCombinations/Total_Expectations.hql sj1dra006:/user/beazer/expectations")
+subprocess.call("plink -batch -load sj1dra006_saved beeline -u jdbc:hive2://hs2prod.corp.adobe.com:10000 -n beazer -p " + str(credential[0][0]) + " -f '/user/beazer/expectations/Total_Expectations.hql'")
